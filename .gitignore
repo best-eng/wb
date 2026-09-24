@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+.venv/
+venv/
+
+# рабочие файлы пользователя
+token.txt
+wb_config.json
+wb_stocks.log
+Остатки_WB_*.xlsx
+~$*.xlsx
