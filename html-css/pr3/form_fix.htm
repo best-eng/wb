@@ -1,0 +1,44 @@
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Поле авторизации</title>
+</head>
+<body>
+
+    <form>
+        <fieldset>
+            <legend>Поле авторизации</legend>
+            Логин: <br /><input type="text" name="login" /><br />
+            Пароль:<br /> <input type="password" name="pas" /><br /><br />
+            <input type="radio" name="session" value="1" />
+            Длинная сессия
+            <input type="radio" name="session" value="2" />
+            Короткая сессия<br /><br />
+            <input type="submit" value="Авторизироваться" />
+        </fieldset>
+    </form>
+
+    <hr>
+
+    <h3>Найденные ошибки</h3>
+    <ol>
+        <li><b>&lt;fieldsit&gt;</b> и <b>&lt;/fieldsit&gt;</b> — такого тега нет,
+            правильно <b>&lt;fieldset&gt;</b> … <b>&lt;/fieldset&gt;</b>.</li>
+        <li><b>&lt;legend&gt;Поле авторизации</b> — не закрыт тег,
+            нужно <b>&lt;/legend&gt;</b>.</li>
+        <li>Логин был <b>type='password'</b> — логин не скрывают,
+            должно быть <b>type="text"</b>.</li>
+        <li>Пароль был <b>type='text'</b> — пароль наоборот нужно скрывать,
+            должно быть <b>type="password"</b>.</li>
+        <li><b>type='chickbox'</b> — опечатка, правильно <b>checkbox</b>.
+            Но длинная и короткая сессия исключают друг друга, а флажки
+            позволяют отметить оба пункта сразу, поэтому здесь нужен
+            <b>type="radio"</b> с одинаковым <b>name="session"</b>.</li>
+        <li><b>type='buton'</b> — опечатка. Кнопка отправляет форму,
+            поэтому <b>type="submit"</b>.</li>
+        <li>Не было <b>&lt;head&gt;</b> с <b>&lt;title&gt;</b> и кодировкой —
+            добавлены, иначе кириллица может отображаться неверно.</li>
+    </ol>
+
+</body>
+</html>

@@ -1,0 +1,97 @@
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Создание формы</title>
+</head>
+<body>
+
+    <h2>Текстовое поле</h2>
+    <!-- input type="text" - однострочное текстовое поле,
+         по умолчанию вмещает 20 знаков -->
+    <form>
+        <p>Введите ФИО в поля ниже:</p>
+        Имя: <input type="text" name="firstname" /><br />
+        Фамилия: <input type="text" name="lastname" /><br />
+        Отчество: <input type="text" name="middlename" />
+    </form>
+
+    <h2>Поле пароля</h2>
+    <!-- input type="password" - вводимые символы закрываются кружками -->
+    <form>
+        Введите пароль: <input type="password" name="pass" />
+    </form>
+
+    <h2>Флажок</h2>
+    <!-- checkbox позволяет выбрать несколько пунктов из группы -->
+    <form>
+        <p>Как вы относитесь к полетам в космос?</p>
+        <input type="checkbox" name="space" value="1" />
+        Положительно, всегда хотел полететь в космос<br />
+        <input type="checkbox" name="space" value="2" />
+        Безразлично, никогда не думал об этом серьезно<br />
+        <input type="checkbox" name="space" value="3" />
+        Отрицательно, меня с детства отталкивают мысли о космосе<br />
+    </form>
+
+    <h2>Радио-кнопка</h2>
+    <!-- radio позволяет выбрать только один пункт из группы:
+         у всех кнопок группы одинаковый name -->
+    <form>
+        <p>Укажите Ваш пол:</p>
+        <input type="radio" name="s" value="m" /> Мужской<br />
+        <input type="radio" name="s" value="f" /> Женский
+    </form>
+
+    <h2>Выпадающий список</h2>
+    <form>
+        <p>Выберите ваш пол</p>
+        <select name="sex">
+            <option value="m">Мужской</option>
+            <option value="f">Женский</option>
+        </select>
+    </form>
+
+    <!-- атрибут multiple позволяет выбрать несколько элементов сразу -->
+    <form>
+        <p>В данном списке может быть одновременно выбрано несколько значений
+        (для этого зажмите клавишу Ctrl и щелкайте на необходимые элементы):</p>
+        <select name="city" multiple="multiple">
+            <option value="london">Лондон</option>
+            <option value="moscow">Москва</option>
+            <option value="newyork">Нью Йорк</option>
+        </select>
+    </form>
+
+    <h2>Заголовки в формах</h2>
+    <!-- fieldset группирует часть формы, legend задаёт заголовок группы -->
+    <form>
+        <fieldset>
+            <legend>Данные о пользователе</legend>
+            Имя: <br /><input type="text" name="firstname" /><br />
+            Фамилия:<br /> <input type="text" name="lastname" /><br />
+            Отчество: <br /><input type="text" name="middlename" /><br />
+            <p>Укажите Ваш пол:</p>
+            <input type="radio" name="s" value="m" /> Мужской<br />
+            <input type="radio" name="s" value="f" /> Женский
+        </fieldset>
+        <fieldset>
+            <legend> Анкета: </legend>
+            <p>Как Вы относитесь к полетам в космос:</p>
+            <input type="checkbox" name="space" value="1" />
+            Положительно, всегда хотел полететь в космос<br />
+            <input type="checkbox" name="space" value="2" />
+            Безразлично, никогда не думал об этом серьезно <br />
+            <input type="checkbox" name="space" value="3" />
+            Отрицательно, меня с детства отталкивают мысли о космосе <br />
+        </fieldset>
+    </form>
+
+    <h2>Кнопка отправления</h2>
+    <!-- адрес, куда уходят данные, задаётся атрибутом action тега form -->
+    <form name="input" action="form.php" method="get">
+        Введите Ваше имя: <input type="text" name="name" />
+        <input type="submit" value="Отправить" />
+    </form>
+
+</body>
+</html>
