@@ -20,10 +20,11 @@ import random
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import quote
 
 # --------------------------------------------------------------------------
 # HTTP-движок
@@ -88,6 +89,15 @@ MAX_DEAD_STREAK = 40      # подряд неудачных запросов, п
 MAX_PROBE_REQUESTS = 36   # предел подбора канала, чтобы не долбить WB впустую
 MAX_PROBE_ROUNDS = 3      # столько профилей браузера перебираем при подборе
 
+# Куда сходить, чтобы узнать свой внешний IP и страну (проверка прокси).
+IP_CHECK_URLS = [
+    "https://ipinfo.io/json",
+    "https://api.myip.com",
+    "https://api.ipify.org?format=json",
+]
+
+PROXY_SCHEMES = ("http", "https", "socks5", "socks5h", "socks4", "socks4a")
+
 STATUS_ON_SALE = "в продаже"
 STATUS_ZERO = "нулевой остаток"
 STATUS_ABSENT = "нет на сайте"
@@ -150,6 +160,72 @@ class Log:
 
 
 # --------------------------------------------------------------------------
+# Прокси
+# --------------------------------------------------------------------------
+
+def normalize_proxy(raw: str) -> str:
+    """Приводит строку прокси к виду scheme://user:pass@host:port.
+
+    Продавцы отдают адреса в разном виде, поэтому понимаем все ходовые:
+        host:port
+        host:port:user:pass          (proxy6, proxy-seller и подобные)
+        user:pass@host:port
+        socks5://user:pass@host:port
+    """
+    raw = (raw or "").strip()
+    if not raw or raw.startswith("#"):
+        return ""
+
+    scheme = "http"
+    if "://" in raw:
+        scheme, _, raw = raw.partition("://")
+        scheme = scheme.lower()
+        if scheme not in PROXY_SCHEMES:
+            raise ValueError(f"неизвестный протокол прокси: {scheme}")
+        # socks5h заставляет резолвить домены на стороне прокси:
+        # иначе DNS идёт от нас и легко упирается в местного провайдера.
+        if scheme == "socks5":
+            scheme = "socks5h"
+
+    user = password = ""
+    if "@" in raw:
+        credentials, _, raw = raw.rpartition("@")
+        user, _, password = credentials.partition(":")
+
+    parts = raw.split(":")
+    if len(parts) == 4 and not user:
+        # host:port:user:pass
+        host, port, user, password = parts
+    elif len(parts) == 2:
+        host, port = parts
+    else:
+        raise ValueError(f"не разобрал адрес прокси: {raw}")
+
+    host = host.strip()
+    port = port.strip()
+    if not host or not port.isdigit():
+        raise ValueError(f"не разобрал адрес прокси: {raw}")
+
+    if user:
+        # Пароли часто содержат спецсимволы — их надо экранировать,
+        # иначе ломается разбор URL внутри curl.
+        auth = f"{quote(user, safe='')}:{quote(password, safe='')}@"
+    else:
+        auth = ""
+    return f"{scheme}://{auth}{host}:{port}"
+
+
+def mask_proxy(url: str) -> str:
+    """Прячет логин и пароль, чтобы не светить их в консоли и логе."""
+    if not url:
+        return "без прокси"
+    scheme, _, rest = url.partition("://")
+    if "@" in rest:
+        rest = rest.rpartition("@")[2]
+    return f"{scheme}://{rest}"
+
+
+# --------------------------------------------------------------------------
 # Конфигурация
 # --------------------------------------------------------------------------
 
@@ -160,10 +236,12 @@ class Config:
     batch_size: int = DEFAULT_BATCH
     delay: float = 0.4
     input_file: str = ""
+    proxies: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, folder: Path, log: Log) -> "Config":
         cfg = cls()
+        raw_proxies: list[str] = []
 
         path = folder / "wb_config.json"
         if path.exists():
@@ -174,9 +252,33 @@ class Config:
                 cfg.batch_size = int(raw.get("batch_size", DEFAULT_BATCH) or DEFAULT_BATCH)
                 cfg.delay = float(raw.get("delay", 0.4) or 0.4)
                 cfg.input_file = str(raw.get("input_file", "") or "")
+                if raw.get("proxy"):
+                    raw_proxies.append(str(raw["proxy"]))
+                if isinstance(raw.get("proxies"), list):
+                    raw_proxies.extend(str(item) for item in raw["proxies"])
                 log(f"Настройки: {path.name}")
             except Exception as exc:
                 log(f"! wb_config.json не прочитан ({exc}), беру настройки по умолчанию")
+
+        proxy_file = folder / "proxy.txt"
+        if proxy_file.exists():
+            try:
+                raw_proxies.extend(proxy_file.read_text(encoding="utf-8-sig").splitlines())
+            except Exception as exc:
+                log(f"! proxy.txt не прочитан: {exc}")
+
+        env_proxy = os.environ.get("WB_PROXY", "").strip()
+        if env_proxy:
+            raw_proxies.append(env_proxy)
+
+        for item in raw_proxies:
+            try:
+                normalized = normalize_proxy(item)
+            except ValueError as exc:
+                log(f"! прокси пропущен — {exc}")
+                continue
+            if normalized and normalized not in cfg.proxies:
+                cfg.proxies.append(normalized)
 
         token_file = folder / "token.txt"
         if not cfg.token and token_file.exists():
@@ -202,6 +304,7 @@ NM_RE = re.compile(r"\b(\d{5,12})\b")
 # Служебные файлы программы — их нельзя принять за список артикулов.
 SERVICE_FILES = {
     "token.txt",
+    "proxy.txt",
     "requirements.txt",
     "wb_config.json",
     "wb_stocks.log",
@@ -356,10 +459,13 @@ class Attempt:
 
 
 class WBClient:
-    def __init__(self, log: Log, delay: float = 0.4, dest_hint: str = "") -> None:
+    def __init__(self, log: Log, delay: float = 0.4, dest_hint: str = "",
+                 proxies: Sequence[str] = ()) -> None:
         self.log = log
         self.delay = delay
         self.dest_hint = dest_hint
+        self.proxies = list(proxies)
+        self.proxy_index = 0
         self.endpoint: str = CARD_ENDPOINTS[0][0]
         self.version: int = CARD_ENDPOINTS[0][1]
         self.dest: str = DEST_CANDIDATES[0]
@@ -375,6 +481,61 @@ class WBClient:
     def profile(self) -> str:
         return IMPERSONATE_PROFILES[self.profile_index % len(IMPERSONATE_PROFILES)]
 
+    @property
+    def proxy(self) -> str:
+        if not self.proxies:
+            return ""
+        return self.proxies[self.proxy_index % len(self.proxies)]
+
+    def proxy_map(self) -> dict[str, str] | None:
+        proxy = self.proxy
+        return {"http": proxy, "https": proxy} if proxy else None
+
+    def report_ip(self) -> bool:
+        """Печатает внешний IP и страну текущего канала. False — не ответил."""
+        for url in IP_CHECK_URLS:
+            payload, error = self.raw_request(url, {})
+            if error or not isinstance(payload, dict):
+                self.log.detail(f"проверка IP через {url}: {error or 'нет данных'}")
+                continue
+
+            ip = payload.get("ip") or payload.get("query") or "?"
+            country = (payload.get("country") or payload.get("cc") or "").upper()
+            where = mask_proxy(self.proxy) if self.proxy else "прямое подключение"
+            suffix = f", страна {country}" if country else ""
+            self.log(f"Внешний IP: {ip}{suffix} ({where})")
+
+            if country and country != "RU":
+                self.log("! IP не российский — WB такие адреса режет целиком.")
+                self.log("  Нужен прокси с российским IP, иначе 403 никуда не денется.")
+            return True
+
+        self.log.detail(f"внешний IP не определён ({mask_proxy(self.proxy)})")
+        return False
+
+    def check_proxy(self) -> None:
+        """Ищет живой прокси и показывает, с какого IP реально пойдут запросы.
+
+        Для WB страна IP — вопрос номер один, и узнать ответ здесь дешевле,
+        чем ловить 403 на каждом запросе. Мёртвые адреса пропускаем сразу,
+        чтобы подбор канала стартовал уже с рабочего прокси.
+        """
+        if not self.proxies:
+            self.new_session(warm_up=False)
+            self.report_ip()
+            return
+
+        # Длинные списки целиком не проверяем — это долгий старт без пользы.
+        for _ in range(min(len(self.proxies), 5)):
+            self.new_session(warm_up=False)
+            if self.report_ip():
+                return
+            self.log(f"! Прокси {mask_proxy(self.proxy)} не отвечает — беру следующий")
+            self.proxy_index += 1
+
+        self.log("! Ни один из проверенных прокси не ответил.")
+        self.log("  Проверьте адрес, порт и логин с паролем в proxy.txt.")
+
     def new_session(self, warm_up: bool = True) -> None:
         """Новая сессия с подменой TLS-отпечатка + прогрев на витрине WB.
 
@@ -382,18 +543,21 @@ class WBClient:
         домене, и запрос к card.wb.ru без них отлетает в 403.
         """
         self.close()
+        proxies = self.proxy_map()
         if HAS_CURL_CFFI:
             for profile in (self.profile, "chrome"):
                 try:
-                    self.session = http_lib.Session(impersonate=profile)
+                    self.session = http_lib.Session(impersonate=profile, proxies=proxies)
                     break
                 except Exception as exc:
                     self.log.detail(f"профиль {profile} недоступен: {exc}")
             if self.session is None:
-                self.session = http_lib.Session()
+                self.session = http_lib.Session(proxies=proxies)
         else:
             self.session = http_lib.Session()
             self.session.headers.update({"User-Agent": FALLBACK_UA})
+            if proxies:
+                self.session.proxies.update(proxies)
 
         if warm_up:
             self.warm_up()
@@ -422,7 +586,15 @@ class WBClient:
             self.session = None
 
     def rotate(self) -> None:
-        """Следующий профиль браузера + свежая сессия."""
+        """Следующий прокси и профиль браузера + свежая сессия с прогревом.
+
+        Прокси меняем вместе с сессией, а не отдельно: куки WB привязаны к IP,
+        на котором их выдали. Сменить IP и утащить старые куки — верный 403,
+        поэтому после каждой смены идёт новый прогрев на витрине.
+        """
+        if len(self.proxies) > 1:
+            self.proxy_index += 1
+            self.log.detail(f"смена прокси на {mask_proxy(self.proxy)}")
         self.profile_index += 1
         self.log.detail(f"смена профиля на {self.profile}")
         self.new_session()
@@ -466,7 +638,9 @@ class WBClient:
                 timeout=REQUEST_TIMEOUT,
             )
         except Exception as exc:
-            return None, f"сеть: {type(exc).__name__}: {exc}"
+            # Отказ самого прокси легко принять за блокировку WB — разделяем.
+            hint = f" (через прокси {mask_proxy(self.proxy)})" if self.proxy else ""
+            return None, f"сеть: {type(exc).__name__}: {exc}{hint}"
 
         code = response.status_code
         if code != 200:
@@ -632,14 +806,18 @@ def fetch_with_split(client: WBClient, nms: Sequence[int]) -> tuple[list[dict], 
 # Официальный API продавца (необязательный, но не блокируется)
 # --------------------------------------------------------------------------
 
-def fetch_supplier_stocks(token: str, log: Log) -> dict[int, int]:
-    """Остатки своих товаров через statistics-api. Пусто, если токена нет."""
+def fetch_supplier_stocks(token: str, log: Log, proxy: str = "") -> dict[int, int]:
+    """Остатки своих товаров через statistics-api. Пусто, если токена нет.
+
+    Токен идёт внутри HTTPS, так что прокси видит только имя хоста.
+    """
     if not token:
         return {}
 
     log("Запрашиваю остатки через API продавца…")
     try:
-        session = http_lib.Session()
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        session = http_lib.Session(proxies=proxies) if proxies else http_lib.Session()
         response = session.get(
             STATS_URL,
             params={"dateFrom": "2019-06-20"},
@@ -814,12 +992,24 @@ def print_diagnosis(client: WBClient, log: Log) -> None:
         log(f"  {endpoint} dest={dest} → {result}{suffix}")
 
     log("")
-    log("Вероятные причины по порядку:")
-    log("  1. Блокировка IP. VPN/прокси вне РФ, корпоративная сеть или")
-    log("     хостинг — WB режет такие адреса целиком. Проверьте с домашнего")
-    log("     интернета или включите российский IP.")
-    log("  2. Нет доступа к wildberries.ru из этой сети (фаервол, DNS).")
-    log("     Откройте https://www.wildberries.ru в браузере на этом же ПК.")
+    if client.proxies:
+        log(f"Перебрано прокси: {len(client.proxies)}")
+        for proxy in client.proxies:
+            log(f"  {mask_proxy(proxy)}")
+        log("")
+        log("Вероятные причины по порядку:")
+        log("  1. Прокси не российский или уже в бане у WB. Строку «Внешний IP»")
+        log("     выше сверьте со страной: нужен RU, желательно резидентный")
+        log("     или мобильный, а не дата-центр.")
+        log("  2. Прокси живой, но WB его знает. Возьмите другой адрес")
+        log("     у того же продавца — дата-центровые подсети выбиваются пачками.")
+    else:
+        log("Вероятные причины по порядку:")
+        log("  1. Блокировка IP. VPN/прокси вне РФ, корпоративная сеть или")
+        log("     хостинг — WB режет такие адреса целиком. Пропишите российский")
+        log("     прокси в proxy.txt рядом с программой.")
+        log("  2. Нет доступа к wildberries.ru из этой сети (фаервол, DNS).")
+        log("     Откройте https://www.wildberries.ru в браузере на этом же ПК.")
     log("  3. WB снова сменил адрес API. Полный протокол запросов лежит")
     log("     в wb_stocks.log рядом с программой.")
     if not HAS_CURL_CFFI:
@@ -853,12 +1043,22 @@ def run() -> int:
 
         log(f"Артикулов к проверке: {len(articles)}")
 
-        supplier = fetch_supplier_stocks(config.token, log)
+        if config.proxies:
+            log(f"Прокси: {len(config.proxies)} шт — {mask_proxy(config.proxies[0])}"
+                + (" и другие" if len(config.proxies) > 1 else ""))
+        else:
+            log("Прокси не задан — иду напрямую")
 
-        client = WBClient(log, delay=config.delay, dest_hint=config.dest)
+        supplier = fetch_supplier_stocks(
+            config.token, log, config.proxies[0] if config.proxies else ""
+        )
+
+        client = WBClient(log, delay=config.delay, dest_hint=config.dest,
+                          proxies=config.proxies)
         products: dict[int, dict] = {}
         errors: dict[int, str] = {}
 
+        client.check_proxy()
         log("Подбираю рабочий канал к WB…")
         if client.probe(articles):
             # Значение из wb_config.json уважаем как есть: по умолчанию это 50,

@@ -12,3 +12,6 @@ wb_config.json
 wb_stocks.log
 Остатки_WB_*.xlsx
 ~$*.xlsx
+
+# прокси-листы
+proxy.txt
