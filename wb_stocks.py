@@ -638,9 +638,14 @@ class WBClient:
                 timeout=REQUEST_TIMEOUT,
             )
         except Exception as exc:
+            # curl тащит в сообщение ссылку на свою документацию и коды —
+            # в консоли это стена текста, поэтому оставляем только суть.
+            message = str(exc).split(". See https://")[0].strip()
+            if len(message) > 120:
+                message = message[:117] + "…"
             # Отказ самого прокси легко принять за блокировку WB — разделяем.
             hint = f" (через прокси {mask_proxy(self.proxy)})" if self.proxy else ""
-            return None, f"сеть: {type(exc).__name__}: {exc}{hint}"
+            return None, f"сеть: {message}{hint}"
 
         code = response.status_code
         if code != 200:
@@ -694,6 +699,8 @@ class WBClient:
         soft_hit: tuple[str, int, str] | None = None
         rounds = min(MAX_PROBE_ROUNDS, len(IMPERSONATE_PROFILES))
         budget = MAX_PROBE_REQUESTS
+        network_failures = 0
+        http_failures = 0
 
         for attempt_round in range(rounds):
             # Со второго круга перебираем только самые вероятные регионы:
@@ -714,6 +721,15 @@ class WBClient:
                     if error:
                         self.attempts.append(Attempt(url, dest, self.profile, error))
                         self.log.detail(f"проба {label}: {error}")
+                        if error.startswith("сеть:"):
+                            network_failures += 1
+                        else:
+                            http_failures += 1
+                        # Если до WB вообще не доходит, перебирать эндпоинты
+                        # незачем: проблема не в блокировке, а в сети.
+                        if http_failures == 0 and network_failures >= 6:
+                            self.log.detail("подбор прекращён: сеть не отвечает")
+                            return self._settle(soft_hit)
                         continue
 
                     products = parse_products(payload)
@@ -981,7 +997,31 @@ def build_rows(articles: Sequence[int], products: dict[int, dict],
 
 def print_diagnosis(client: WBClient, log: Log) -> None:
     """Когда ни одна комбинация не сработала — говорим, что именно пробовали."""
+    network_only = bool(client.attempts) and all(
+        attempt.result.startswith("сеть:") for attempt in client.attempts
+    )
+
     log("")
+    if network_only:
+        # До WB не дошёл ни один запрос — дело не в блокировке.
+        log("Соединение не устанавливается вообще. Ошибка связи:")
+        log(f"  {client.attempts[0].result}")
+        log("")
+        if client.proxies:
+            log("Так отвечает нерабочий прокси. Проверьте:")
+            log("  1. Адрес, порт, логин и пароль в proxy.txt — опечатка в одном")
+            log("     символе выглядит ровно так же.")
+            log("  2. Оплачен ли прокси и не кончился ли срок аренды.")
+            log("  3. Не привязан ли прокси к другому IP: многие продавцы пускают")
+            log("     только с адреса, который вы указали в личном кабинете.")
+        else:
+            log("Похоже, нет доступа в интернет: фаервол, антивирус или прокси")
+            log("организации. Откройте https://www.wildberries.ru в браузере —")
+            log("если тоже не открывается, программа тут ни при чём.")
+        log("")
+        log(f"Полный протокол: {log.path}")
+        return
+
     log("Не удалось получить ни одного ответа от WB. Что пробовали:")
     grouped: dict[tuple[str, str, str], int] = {}
     for attempt in client.attempts:

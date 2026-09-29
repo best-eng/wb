@@ -26,8 +26,21 @@ pip install -r requirements.txt
 python wb_stocks.py
 ```
 
-Сборка exe — `build.bat`, результат в `dist\wb_stocks.exe`.
-Флаг `--collect-all curl_cffi` обязателен: без него в exe не попадают
+## Как получить exe
+
+PyInstaller не умеет кросс-компиляцию: exe собирается только на Windows.
+Два способа.
+
+**На своём компьютере.** Нужен [Python 3.11+](https://www.python.org/downloads/),
+при установке отметьте «Add Python to PATH». Дальше двойным щелчком по
+`build.bat`, результат — `dist\wb_stocks.exe`.
+
+**Через GitHub Actions**, если Python ставить не хочется. Сборка идёт на
+Windows-машине GitHub: вкладка Actions → «Сборка wb_stocks.exe» → Run workflow,
+через пару минут готовый exe лежит в артефактах запуска. Workflow запускается
+и сам при каждом изменении `wb_stocks.py`.
+
+Флаг `--collect-all curl_cffi` в сборке обязателен: без него в exe не попадают
 библиотеки libcurl, подмена TLS-отпечатка молча отключается и 403 возвращается.
 
 ## Файл с артикулами

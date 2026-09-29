@@ -1,0 +1,61 @@
+name: Сборка wb_stocks.exe
+
+# Собираем на настоящей Windows: PyInstaller не умеет кросс-компиляцию,
+# exe можно получить только на Windows-машине.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "wb_stocks.py"
+      - "requirements.txt"
+      - ".github/workflows/build-exe.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Собрать exe
+        run: >
+          python -m PyInstaller
+          --onefile
+          --console
+          --name wb_stocks
+          --collect-all curl_cffi
+          --collect-all openpyxl
+          --clean
+          --noconfirm
+          wb_stocks.py
+
+      - name: Проверить, что exe запускается
+        shell: pwsh
+        run: |
+          # Без файла с артикулами программа должна сказать об этом и выйти с кодом 1.
+          # Главное здесь — что exe стартует: битую сборку видно сразу.
+          $ErrorActionPreference = "Continue"
+          $output = "" | & ".\dist\wb_stocks.exe" 2>&1 | Out-String
+          Write-Host $output
+          if ($output -notmatch "артикул") {
+            Write-Error "exe не выдал ожидаемый вывод — сборка битая"
+            exit 1
+          }
+          Write-Host "exe стартует нормально"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb_stocks-exe
+          path: dist/wb_stocks.exe
+          retention-days: 30
