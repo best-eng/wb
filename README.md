@@ -35,6 +35,19 @@ PyInstaller не умеет кросс-компиляцию: exe собирае�
 при установке отметьте «Add Python to PATH». Дальше двойным щелчком по
 `build.bat`, результат — `dist\wb_stocks.exe`.
 
+Руками это две команды:
+
+```
+python -m pip install curl_cffi openpyxl pyinstaller
+python -m PyInstaller --onefile --console --name wb_stocks --collect-all curl_cffi --collect-all openpyxl wb_stocks.py
+```
+
+Именно `python -m PyInstaller`, а не голое `pyinstaller`: папка `Scripts`,
+куда pip кладёт exe-обёртки, часто отсутствует в PATH, и команда не находится.
+Заглавные `P` и `I` обязательны — имя модуля регистрозависимо. Если и `python`
+не распознан, замените его на `py`, а если Python только что установлен —
+закройте и откройте консоль, старое окно о новом PATH не знает.
+
 **Через GitHub Actions**, если Python ставить не хочется. Сборка идёт на
 Windows-машине GitHub: вкладка Actions → «Сборка wb_stocks.exe» → Run workflow,
 через пару минут готовый exe лежит в артефактах запуска. Workflow запускается
