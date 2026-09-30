@@ -36,6 +36,7 @@ jobs:
           --name wb_stocks
           --collect-all curl_cffi
           --collect-all openpyxl
+          --hidden-import wb_browser
           --clean
           --noconfirm
           wb_stocks.py

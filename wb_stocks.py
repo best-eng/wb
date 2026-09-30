@@ -237,6 +237,9 @@ class Config:
     delay: float = 0.4
     input_file: str = ""
     proxies: list[str] = field(default_factory=list)
+    mode: str = "auto"          # auto | http | browser
+    browser_path: str = ""
+    headless: bool = True
 
     @classmethod
     def load(cls, folder: Path, log: Log) -> "Config":
@@ -252,6 +255,9 @@ class Config:
                 cfg.batch_size = int(raw.get("batch_size", DEFAULT_BATCH) or DEFAULT_BATCH)
                 cfg.delay = float(raw.get("delay", 0.4) or 0.4)
                 cfg.input_file = str(raw.get("input_file", "") or "")
+                cfg.mode = str(raw.get("mode", "auto") or "auto").lower()
+                cfg.browser_path = str(raw.get("browser_path", "") or "")
+                cfg.headless = bool(raw.get("headless", True))
                 if raw.get("proxy"):
                     raw_proxies.append(str(raw["proxy"]))
                 if isinstance(raw.get("proxies"), list):
@@ -1234,7 +1240,29 @@ def run_proxy_test(folder: Path, config: Config, log: Log) -> int:
     return 0
 
 
-def run(test_only: bool = False) -> int:
+def start_browser_client(config: Config, log: Log):
+    """Поднимает браузер и возвращает готовый клиент. None — не вышло."""
+    try:
+        from wb_browser import BrowserClient
+    except ImportError as exc:
+        log(f"Браузерный режим недоступен: {exc}")
+        log("Установите зависимость: pip install websocket-client")
+        return None
+
+    log("")
+    log("Запускаю браузер…")
+    client = BrowserClient(log, browser_path=config.browser_path,
+                           headless=config.headless, delay=config.delay)
+    if not client.start():
+        client.close()
+        return None
+
+    client.dest = config.dest or client.detect_dest() or DEST_CANDIDATES[0]
+    log(f"Регион: dest={client.dest}")
+    return client
+
+
+def run(test_only: bool = False, force_browser: bool = False) -> int:
     setup_console()
     folder = base_dir()
     log = Log(folder / "wb_stocks.log")
@@ -1242,6 +1270,9 @@ def run(test_only: bool = False) -> int:
 
     try:
         config = Config.load(folder, log)
+
+        if force_browser:
+            config.mode = "browser"
 
         if test_only:
             return run_proxy_test(folder, config, log)
@@ -1270,17 +1301,43 @@ def run(test_only: bool = False) -> int:
             config.token, log, config.proxies[0] if config.proxies else ""
         )
 
-        client = WBClient(log, delay=config.delay, dest_hint=config.dest,
-                          proxies=config.proxies)
         products: dict[int, dict] = {}
         errors: dict[int, str] = {}
 
-        client.check_proxy()
-        log("Подбираю рабочий канал к WB…")
-        if client.probe(articles):
-            # Значение из wb_config.json уважаем как есть: по умолчанию это 50,
-            # и дальше размер всё равно подстроится сам при первом отказе.
-            client.batch_size = max(MIN_BATCH, min(config.batch_size, 100))
+        client: Any
+        if config.mode == "browser":
+            client = start_browser_client(config, log)
+            opened = client is not None
+        else:
+            client = WBClient(log, delay=config.delay, dest_hint=config.dest,
+                              proxies=config.proxies)
+            client.check_proxy()
+            log("Подбираю рабочий канал к WB…")
+            opened = client.probe(articles)
+
+            # В режиме auto браузер — запасной путь: обычные запросы WB
+            # закрывает, а изнутри своей же страницы отдаёт данные.
+            if not opened and config.mode == "auto":
+                log("")
+                log("Обычные запросы не прошли — пробую через браузер.")
+                fallback = start_browser_client(config, log)
+                if fallback is not None:
+                    client.close()
+                    client = fallback
+                    opened = True
+
+        if client is None:
+            # Браузер не поднялся: отчёт всё равно делаем, но честно
+            # помечаем, что проверка не состоялась.
+            log("")
+            log("Браузерный режим не запустился — проверка не выполнена.")
+            for nm in articles:
+                errors[nm] = "браузер не запустился"
+        elif opened:
+            # У браузерного клиента свой размер пачки: ответ едет через
+            # отладочный канал, и раздувать сообщения незачем.
+            if isinstance(client, WBClient):
+                client.batch_size = max(MIN_BATCH, min(config.batch_size, 100))
             log(f"Опрашиваю пачками по {client.batch_size} шт")
             log("")
 
@@ -1313,9 +1370,11 @@ def run(test_only: bool = False) -> int:
         else:
             for nm in articles:
                 errors[nm] = "WB не ответил ни на одну пробу"
-            print_diagnosis(client, log)
+            if isinstance(client, WBClient):
+                print_diagnosis(client, log)
 
-        client.close()
+        if client is not None:
+            client.close()
 
         rows = build_rows(articles, products, errors, supplier)
         report = folder / f"Остатки_WB_{datetime.now():%Y-%m-%d_%H-%M}.xlsx"
@@ -1366,8 +1425,10 @@ def run(test_only: bool = False) -> int:
 
 def main() -> None:
     # Режим проверки каналов: wb_stocks.exe --test
-    test_mode = any(arg.lower() in ("--test", "-t", "test") for arg in sys.argv[1:])
-    code = run(test_only=test_mode)
+    args = [a.lower() for a in sys.argv[1:]]
+    test_mode = any(a in ("--test", "-t", "test") for a in args)
+    force_browser = any(a in ("--browser", "-b", "browser") for a in args)
+    code = run(test_only=test_mode, force_browser=force_browser)
     try:
         input("\nНажмите Enter, чтобы закрыть окно...")
     except (EOFError, KeyboardInterrupt):
