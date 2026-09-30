@@ -1116,7 +1116,99 @@ def print_diagnosis(client: WBClient, log: Log) -> None:
     log("Statistics API продавца — остатки своих товаров тогда возьмутся оттуда.")
 
 
-def run() -> int:
+# Артикул для проверки канала, если своих под рукой нет.
+PROBE_NM = 173538814
+
+
+def check_one_channel(log: Log, proxy: str, nm: int, dest_hint: str) -> str:
+    """Гоняет один боевой запрос через один канал. Возвращает вердикт."""
+    label = mask_proxy(proxy) if proxy else "прямое подключение"
+    log("")
+    log(f"--- {label}")
+
+    client = WBClient(log, delay=0, dest_hint=dest_hint,
+                      proxies=[proxy] if proxy else [])
+    try:
+        client.new_session(warm_up=False)
+        if not client.report_ip():
+            return f"{label}: НЕ ОТВЕЧАЕТ (прокси мёртв или неверный логин/пароль)"
+
+        client.warm_up()
+        log(f"Витрина wildberries.ru: {client.warm_status}, "
+            f"куки: {client.warm_cookies or 'нет'}")
+
+        dest = dest_hint or client.detect_dest() or DEST_CANDIDATES[0]
+        client.dest = dest
+        client.endpoint, client.version = CARD_ENDPOINTS[0]
+        log(f"Запрос карточки {nm} (dest={dest})…")
+
+        products, error = client.fetch([nm], attempts=1)
+        if not error and products:
+            stock = product_stock(products[0])
+            name = str(products[0].get("name") or "")[:40]
+            log(f"Получена карточка: {name} — остаток {stock} шт")
+            return f"{label}: РАБОТАЕТ"
+        if not error:
+            # 200 без товаров — канал открыт, просто артикул не найден.
+            return f"{label}: КАНАЛ ОТКРЫТ (артикул {nm} не найден, возьмите свой)"
+        if "403" in error:
+            return f"{label}: WB БЛОКИРУЕТ ({error})"
+        return f"{label}: НЕ РАБОТАЕТ ({error})"
+    finally:
+        client.close()
+
+
+def run_proxy_test(folder: Path, config: Config, log: Log) -> int:
+    """Быстрая проверка каналов без полного прогона по всем артикулам."""
+    log("=" * 60)
+    log("ПРОВЕРКА КАНАЛОВ ДО WILDBERRIES")
+    log("=" * 60)
+
+    nm = PROBE_NM
+    source = find_input_file(folder, config.input_file)
+    if source is not None:
+        try:
+            own = read_articles(source)
+            if own:
+                nm = own[0]
+                log(f"Проверяю на вашем артикуле {nm} из {source.name}")
+        except Exception:
+            pass
+
+    channels: list[str] = list(config.proxies)
+    if not channels:
+        log("")
+        log("proxy.txt пуст — проверяю только прямое подключение.")
+        channels = [""]
+    else:
+        # Прямое подключение проверяем тоже: полезно знать, стало ли лучше.
+        channels = channels + [""]
+
+    verdicts = [check_one_channel(log, proxy, nm, config.dest) for proxy in channels]
+
+    log("")
+    log("=" * 60)
+    log("ИТОГ")
+    log("=" * 60)
+    for verdict in verdicts:
+        log(f"  {verdict}")
+
+    working = [v for v in verdicts if "РАБОТАЕТ" in v or "КАНАЛ ОТКРЫТ" in v]
+    log("")
+    if working:
+        log("Годные каналы есть — оставьте их в proxy.txt и запускайте")
+        log("программу обычным способом.")
+    else:
+        log("Ни один канал не пробился. Если прокси российский и живой,")
+        log("значит дело не в IP: WB режет сам тип запроса, и другой адрес")
+        log("ничего не изменит. Дальше имеет смысл только другой источник")
+        log("данных — см. README, раздел про варианты.")
+    log("")
+    log(f"Полный протокол: {log.path}")
+    return 0
+
+
+def run(test_only: bool = False) -> int:
     setup_console()
     folder = base_dir()
     log = Log(folder / "wb_stocks.log")
@@ -1124,6 +1216,9 @@ def run() -> int:
 
     try:
         config = Config.load(folder, log)
+
+        if test_only:
+            return run_proxy_test(folder, config, log)
 
         source = find_input_file(folder, config.input_file)
         if source is None:
@@ -1244,7 +1339,9 @@ def run() -> int:
 
 
 def main() -> None:
-    code = run()
+    # Режим проверки каналов: wb_stocks.exe --test
+    test_mode = any(arg.lower() in ("--test", "-t", "test") for arg in sys.argv[1:])
+    code = run(test_only=test_mode)
     try:
         input("\nНажмите Enter, чтобы закрыть окно...")
     except (EOFError, KeyboardInterrupt):
