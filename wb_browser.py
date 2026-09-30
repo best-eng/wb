@@ -233,8 +233,16 @@ class BrowserClient:
         """Дожидаемся загрузки витрины: именно она выдаёт куки и токены."""
         assert self.cdp is not None
         deadline = time.time() + 60
+        self.log("Открываю витрину wildberries.ru…")
+        reported = 0.0
 
         while time.time() < deadline:
+            # Молчание на минуту выглядит как зависание, поэтому отмечаемся.
+            waited = 60 - (deadline - time.time())
+            if waited - reported >= 15:
+                reported = waited
+                self.log(f"  всё ещё жду загрузку… {int(waited)} с")
+
             try:
                 state = self.cdp.evaluate("document.readyState", timeout=15)
                 host = self.cdp.evaluate("location.hostname", timeout=15)

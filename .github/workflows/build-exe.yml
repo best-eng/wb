@@ -7,6 +7,7 @@ on:
     branches: ["**"]
     paths:
       - "wb_stocks.py"
+      - "wb_browser.py"
       - "requirements.txt"
       - ".github/workflows/build-exe.yml"
   workflow_dispatch:
@@ -37,6 +38,7 @@ jobs:
           --collect-all curl_cffi
           --collect-all openpyxl
           --hidden-import wb_browser
+          --hidden-import websocket
           --clean
           --noconfirm
           wb_stocks.py

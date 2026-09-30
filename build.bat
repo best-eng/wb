@@ -36,7 +36,7 @@ rem --collect-all curl_cffi is required: without it libcurl is left out
 rem of the exe, TLS impersonation silently stops working and Wildberries
 rem starts answering 403 again.
 %PY% -m PyInstaller --onefile --console --name wb_stocks ^
-  --collect-all curl_cffi --collect-all openpyxl --hidden-import wb_browser ^
+  --collect-all curl_cffi --collect-all openpyxl --hidden-import wb_browser --hidden-import websocket ^
   --clean --noconfirm wb_stocks.py
 if errorlevel 1 goto fail
 
