@@ -1026,6 +1026,18 @@ def write_report(rows: Sequence[Row], path: Path) -> None:
 # Основной сценарий
 # --------------------------------------------------------------------------
 
+def plural(number: int, one: str, few: str, many: str) -> str:
+    """Русское склонение после числа: 1 артикулу, 2 артикулам, 5 артикулам."""
+    if 11 <= number % 100 <= 14:
+        return many
+    last = number % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
 def build_rows(articles: Sequence[int], products: dict[int, dict],
                errors: dict[int, str], supplier: dict[int, int]) -> list[Row]:
     rows: list[Row] = []
@@ -1402,6 +1414,9 @@ def run(test_only: bool = False, force_browser: bool = False) -> int:
 
         on_sale = sum(1 for row in rows if row.status == STATUS_ON_SALE)
         zero = sum(1 for row in rows if row.status == STATUS_ZERO)
+        # Строки, где известен сам факт продажи, но не количество.
+        unknown = sum(1 for row in rows
+                      if row.status == STATUS_ON_SALE and "точное число" in row.note)
         absent = sum(1 for row in rows if row.status == STATUS_ABSENT)
         failed_count = sum(1 for row in rows if row.status == STATUS_ERROR)
         total_stock = sum(row.stock for row in rows)
@@ -1411,10 +1426,23 @@ def run(test_only: bool = False, force_browser: bool = False) -> int:
         log(f"Всего артикулов: {len(rows)}")
         log(f"Найдено карточек: {on_sale + zero}")
         log(f"  в продаже: {on_sale}")
+        if unknown:
+            log(f"    из них без количества: {unknown}")
         log(f"  нулевой остаток: {zero}")
         log(f"Нет на сайте: {absent}")
         log(f"Ошибок запроса: {failed_count}")
-        log(f"Суммарный остаток: {total_stock} шт")
+        if unknown and unknown == on_sale:
+            # Иначе «суммарный остаток: 0» рядом с сотней товаров в наличии
+            # читается как поломка, хотя это ограничение самого сайта.
+            log("Суммарный остаток: не подсчитать — WB не показал ни одного")
+            log("точного количества. В наличии товар есть, цифр на страницах нет.")
+        else:
+            counted = on_sale - unknown
+            tail = ""
+            if unknown:
+                word = plural(counted, "артикулу", "артикулам", "артикулам")
+                tail = f" (по {counted} {word} с точным числом)"
+            log(f"Суммарный остаток: {total_stock} шт{tail}")
         log("-" * 56)
         log(f"Готово за {time.time() - started:.1f} с")
         log(f"Отчёт: {report}")

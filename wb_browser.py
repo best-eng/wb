@@ -195,6 +195,7 @@ class BrowserClient:
 
         self.batch_size = PAGE_BATCH
         self.dead_streak = 0
+        self.dumped = 0        # сколько непонятных страниц уже описали в логе
         self.dest = ""
         self.attempts: list = []
         self.warm_status = "не выполнялся"
@@ -413,6 +414,7 @@ class BrowserClient:
         else:
             # Товар продаётся, но точного числа WB на странице не показывает.
             quantity, known = 0, False
+            self._dump_availability(nm, text)
 
         price = None
         match = PRICE_RE.search(str(raw.get("price") or "")) or PRICE_RE.search(text)
@@ -430,6 +432,30 @@ class BrowserClient:
             "_stock_known": known,
             "_page_price": price,
         }
+
+    def _dump_availability(self, nm: int, text: str) -> None:
+        """Кладёт в лог кусок страницы, если признаки наличия не опознаны.
+
+        Когда ни одна формулировка не совпала, все товары валятся в «продаётся,
+        число неизвестно», и по итогам этого не видно. Поэтому для первых
+        нескольких таких артикулов сохраняем окрестность ключевых слов —
+        по ней сразу понятно, какие слова WB использует на самом деле.
+        """
+        if self.dumped >= 3:
+            return
+        self.dumped += 1
+
+        lowered = text.lower()
+        for word in ("остал", "нали", "корзин", "законч", "распрод", "склад"):
+            position = lowered.find(word)
+            if position >= 0:
+                start = max(0, position - 120)
+                piece = text[start:position + 200].replace("\n", " | ")
+                self.log.detail(f"артикул {nm}: около «{word}»: {piece}")
+                return
+
+        self.log.detail(f"артикул {nm}: ключевых слов нет; начало: "
+                        f"{text[:300]!r}")
 
     def fetch(self, nms: Sequence[int], attempts: int = 0) -> tuple[list[dict], str]:
         """Страницы открываются по одной; пачка нужна для отображения хода."""
