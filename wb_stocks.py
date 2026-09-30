@@ -529,6 +529,17 @@ class WBClient:
                 self.log("  Нужен прокси с российским IP, иначе 403 никуда не денется.")
             return True
 
+        # Сервисы определения IP бывают закрыты корпоративной сетью,
+        # а гео-сервис WB отдаёт наш адрес и доступен раз мы идём к WB.
+        payload, error = self.raw_request(GEO_URL, {
+            "currency": "RUB", "latitude": "55.7522",
+            "longitude": "37.6156", "locale": "ru",
+        })
+        if not error and isinstance(payload, dict) and payload.get("ip"):
+            where = mask_proxy(self.proxy) if self.proxy else "прямое подключение"
+            self.log(f"Внешний IP: {payload['ip']} ({where}, по данным WB)")
+            return True
+
         self.log.detail(f"внешний IP не определён ({mask_proxy(self.proxy)})")
         return False
 
