@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 # --------------------------------------------------------------------------
 # HTTP-движок
@@ -57,12 +57,13 @@ CARD_ENDPOINTS: list[tuple[str, int]] = [
 ]
 
 # Коды региона доставки. Без валидного dest WB отвечает 403/400.
+# Запасные коды региона на случай, если гео-сервис недоступен.
+# Формат WB сменил: актуальные коды — длинные положительные числа,
+# старые отрицательные оставлены последними как последняя надежда.
 DEST_CANDIDATES: list[str] = [
-    "-1257786",   # Москва
-    "-1255987",   # Москва, альтернативный
-    "-1029256",   # Санкт-Петербург
-    "123585487",  # новый формат
-    "-59202",     # Краснодар
+    "1259570991",  # Москва, действующий формат
+    "-1257786",    # Москва, старый формат
+    "-1029256",    # Санкт-Петербург, старый формат
 ]
 
 IMPERSONATE_PROFILES: list[str] = [
@@ -657,8 +658,15 @@ class WBClient:
 
         code = response.status_code
         if code != 200:
-            snippet = (response.text or "")[:200].replace("\n", " ")
+            body = response.text or ""
+            snippet = body[:200].replace("\n", " ")
             self.log.detail(f"{url} -> {code}; тело: {snippet}")
+            # В ответ на запрос API прилетела HTML-страница «доступ запрещён» —
+            # это блокировка на входе, а не отказ самого API. Разница
+            # принципиальная: чинить надо маршрут, а не запрос.
+            lowered = body[:2000].lower()
+            if code == 403 and ("<html" in lowered or "доступ" in lowered):
+                return None, "HTTP 403 (страница блокировки, не ответ API)"
             return None, f"HTTP {code}"
 
         try:
@@ -683,13 +691,28 @@ class WBClient:
         if error or not isinstance(payload, dict):
             self.log.detail(f"гео-запрос не дал dest: {error}")
             return ""
+        # Настоящий код лежит в xinfo — готовой строке параметров,
+        # которую WB собирает для себя: "appType=1&curr=rub&dest=...&spp=30".
+        xinfo = payload.get("xinfo")
+        if isinstance(xinfo, str) and xinfo:
+            dest = parse_qs(xinfo).get("dest", [""])[0].strip()
+            if dest:
+                self.log.detail(f"dest из xinfo: {dest}")
+                return dest
+
         for key in ("dest", "destination"):
             value = payload.get(key)
             if isinstance(value, (int, str)) and str(value).strip():
                 return str(value).strip()
+
+        # В destinations лежит несколько кодов, и нужный — не первый.
+        # Актуальные коды положительные и длинные, устаревшие отрицательные.
         destinations = payload.get("destinations")
         if isinstance(destinations, list) and destinations:
-            return str(destinations[0])
+            positive = [d for d in destinations if isinstance(d, int) and d > 0]
+            if positive:
+                return str(max(positive))
+            return str(destinations[-1])
         return ""
 
     def probe(self, sample: Sequence[int]) -> bool:
@@ -1044,7 +1067,27 @@ def print_diagnosis(client: WBClient, log: Log) -> None:
         suffix = f" ×{count}" if count > 1 else ""
         log(f"  {endpoint} dest={dest} → {result}{suffix}")
 
+    blocked_page = any(
+        "страница блокировки" in attempt.result for attempt in client.attempts
+    )
+
     log("")
+    if blocked_page:
+        # Ключевой факт: ответ пришёл от фильтра на входе, не от API.
+        log("WB вернул страницу блокировки вместо ответа API.")
+        log("Это значит, что запросы к card.wb.ru закрыты для вашей сети —")
+        log("дело не в программе и не в артикулах.")
+        log("")
+        log("Проверьте за минуту: откройте на телефоне, отключив Wi-Fi,")
+        log("тот же адрес card.wb.ru. Открылся текст с данными — закрыт именно")
+        log("ваш домашний IP, поможет прокси (см. proxy.txt в README).")
+        log("Та же страница блокировки — закрыт весь канал, и надёжнее всего")
+        log("перейти на официальный API продавца по token.txt.")
+        log("")
+        log(f"Полный протокол: {log.path}")
+        # Причина установлена точно, дальше гадать не о чем.
+        return
+
     if client.proxies:
         log(f"Перебрано прокси: {len(client.proxies)}")
         for proxy in client.proxies:
