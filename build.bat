@@ -1,58 +1,53 @@
 @echo off
-chcp 65001 >nul
-rem Сборка wb_stocks.exe. Запускать из папки с wb_stocks.py.
+setlocal
 
-rem Ищем Python сами: голая команда pyinstaller часто не находится,
-rem потому что папка Scripts не попадает в PATH. Через -m это не важно.
+rem Builds wb_stocks.exe. Run from the folder containing wb_stocks.py.
+rem Uses "python -m PyInstaller": a bare "pyinstaller" command is often
+rem missing from PATH even when the package is installed.
+
+cd /d "%~dp0"
+
 set PY=
 python --version >nul 2>&1
 if %errorlevel%==0 set PY=python
 if defined PY goto found
-
 py --version >nul 2>&1
 if %errorlevel%==0 set PY=py
 if defined PY goto found
 
 echo.
-echo Python не найден.
+echo Python not found.
+echo Install it from https://www.python.org/downloads/ and tick
+echo "Add Python to PATH". Then close this window, open it again
+echo and run build.bat once more - an open console does not see
+echo the new PATH.
 echo.
-echo Установите его с https://www.python.org/downloads/ и при установке
-echo обязательно отметьте "Add Python to PATH".
-echo Затем закройте это окно и запустите build.bat заново: уже открытая
-echo консоль о новом PATH не знает.
-echo.
-pause
-exit /b 1
+goto end
 
 :found
-echo Использую: %PY%
+echo Using: %PY%
 echo.
 
 %PY% -m pip install --upgrade pip
 %PY% -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto fail
 
-rem --collect-all curl_cffi обязателен: без него в exe не попадают
-rem библиотеки libcurl, подмена TLS-отпечатка молча отключается
-rem и Wildberries снова начинает отвечать 403.
-%PY% -m PyInstaller ^
-  --onefile ^
-  --console ^
-  --name wb_stocks ^
-  --collect-all curl_cffi ^
-  --collect-all openpyxl ^
-  --clean ^
-  --noconfirm ^
-  wb_stocks.py
+rem --collect-all curl_cffi is required: without it libcurl is left out
+rem of the exe, TLS impersonation silently stops working and Wildberries
+rem starts answering 403 again.
+%PY% -m PyInstaller --onefile --console --name wb_stocks ^
+  --collect-all curl_cffi --collect-all openpyxl ^
+  --clean --noconfirm wb_stocks.py
 if errorlevel 1 goto fail
 
 echo.
-echo Готово: dist\wb_stocks.exe
+echo Done: dist\wb_stocks.exe
 goto end
 
 :fail
 echo.
-echo Сборка не удалась. Смотрите сообщения выше.
+echo Build failed. See the messages above.
 
 :end
+echo.
 pause
