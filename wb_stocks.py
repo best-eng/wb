@@ -53,7 +53,6 @@ CARD_ENDPOINTS: list[tuple[str, int]] = [
     ("https://card.wb.ru/cards/v2/detail", 2),
     ("https://u-card.wb.ru/cards/v4/detail", 4),
     ("https://card.wb.ru/cards/v4/detail", 4),
-    ("https://napi.wb.ru/cards/v2/detail", 2),
     ("https://card.wb.ru/cards/detail", 1),
 ]
 
@@ -474,6 +473,10 @@ class WBClient:
         self.dead_streak = 0
         self.batch_size = DEFAULT_BATCH
         self.attempts: list[Attempt] = []
+        # Результат прогрева витрины: без его кук карточки отдают 403,
+        # поэтому при разборе полётов это первое, что надо знать.
+        self.warm_status = "не выполнялся"
+        self.warm_cookies = ""
 
     # -- сессия ------------------------------------------------------------
 
@@ -573,8 +576,13 @@ class WBClient:
                 },
                 timeout=REQUEST_TIMEOUT,
             )
-            self.log.detail(f"прогрев {WB_MAIN} -> {response.status_code}")
+            self.warm_status = str(response.status_code)
+            cookies = "; ".join(sorted(self.session.cookies.keys()))
+            self.warm_cookies = cookies
+            self.log.detail(f"прогрев {WB_MAIN} -> {response.status_code}, куки: {cookies or 'нет'}")
         except Exception as exc:
+            self.warm_status = f"ошибка ({type(exc).__name__})"
+            self.warm_cookies = ""
             self.log.detail(f"прогрев не удался: {exc}")
 
     def close(self) -> None:
@@ -1022,7 +1030,12 @@ def print_diagnosis(client: WBClient, log: Log) -> None:
         log(f"Полный протокол: {log.path}")
         return
 
-    log("Не удалось получить ни одного ответа от WB. Что пробовали:")
+    log("Не удалось получить ни одного ответа от WB.")
+    log("")
+    log(f"Прогрев www.wildberries.ru: {client.warm_status}")
+    log(f"Куки после прогрева: {client.warm_cookies or 'НЕТ — это и есть причина 403'}")
+    log("")
+    log("Что пробовали:")
     grouped: dict[tuple[str, str, str], int] = {}
     for attempt in client.attempts:
         key = (attempt.endpoint, attempt.dest, attempt.result)
