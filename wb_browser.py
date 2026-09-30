@@ -1,45 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Браузерный режим: запросы к WB идут изнутри настоящей страницы.
+Браузерный режим: чтение публичных страниц товаров.
 
-Зачем. Wildberries закрывает card.wb.ru для внешних клиентов, но сайт сам
-эти данные получает. Если запрос выполняется в контексте открытой вкладки
-wildberries.ru, он неотличим от обычного — со всеми куками, заголовками
-и токенами, которые страница выставляет себе сама.
+Как это работает. Программа запускает установленный у вас Edge или Chrome
+и открывает обычную страницу товара — ту же самую, что видит любой
+посетитель, — после чего читает с неё название, бренд, цену и наличие.
+Ничего, кроме открытия публичной страницы, здесь не делается.
 
-Как. Берём уже установленный Edge (или Chrome), запускаем с портом отладки
-и разговариваем с ним по CDP — протоколу, встроенному в любой Chromium.
-Playwright не нужен: он тянет Node-драйвер и плохо пакуется в exe,
-а тут хватает одного websocket-клиента.
+Про остаток. Точное число Wildberries показывает не всегда: обычно только
+когда товара мало («Осталось 3 шт»). Если числа на странице нет, а товар
+продаётся, в отчёт идёт «в наличии» без количества и пометка в комментарии.
+Это свойство сайта, а не программы.
 
-Скорость. Запрос выполняется через fetch() на странице и принимает пачку
-артикулов сразу, поэтому 866 штук — это три десятка запросов, а не 866
-загрузок страниц.
+Про скорость. Одна страница — примерно две-три секунды, поэтому список
+на восемьсот с лишним артикулов занимает около получаса. Картинки и шрифты
+не загружаются, это заметно ускоряет обход.
+
+Управление браузером идёт по CDP — протоколу отладки, встроенному в любой
+Chromium. Playwright не взят намеренно: он тянет Node-драйвер и плохо
+пакуется в exe, а здесь хватает одного websocket-клиента, и сам браузер
+не скачивается — используется уже установленный.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 WB_MAIN = "https://www.wildberries.ru/"
-GEO_URL = "https://user-geo-data.wildberries.ru/get-geo-info"
-CARD_URL = "https://card.wb.ru/cards/v2/detail"
+PRODUCT_URL = "https://www.wildberries.ru/catalog/{nm}/detail.aspx"
 
-# Пачка меньше, чем в обычном режиме: ответ едет через отладочный канал,
-# и раздувать сообщения незачем.
-BROWSER_BATCH = 30
+# Пачка нужна только для отображения хода работы: страницы всё равно
+# открываются по одной.
+PAGE_BATCH = 10
+
+# Картинки и шрифты для чтения текста не нужны, а грузятся долго.
+BLOCKED_RESOURCES = [
+    "*.jpg", "*.jpeg", "*.png", "*.webp", "*.gif", "*.svg",
+    "*.woff", "*.woff2", "*.ttf", "*.mp4",
+]
 
 WINDOWS_BROWSERS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -61,8 +71,7 @@ def find_browser(explicit: str = "") -> str:
     if explicit:
         return explicit if Path(explicit).exists() else ""
 
-    candidates = WINDOWS_BROWSERS if os.name == "nt" else LINUX_BROWSERS
-    for path in candidates:
+    for path in (WINDOWS_BROWSERS if os.name == "nt" else LINUX_BROWSERS):
         if Path(path).exists():
             return path
 
@@ -117,7 +126,6 @@ class CDP:
         raise CDPError(f"браузер не ответил на {method}")
 
     def evaluate(self, expression: str, timeout: int = 60) -> Any:
-        """Выполняет JS на странице и возвращает результат по значению."""
         result = self.call("Runtime.evaluate", {
             "expression": expression,
             "awaitPromise": True,
@@ -125,8 +133,7 @@ class CDP:
         }, timeout=timeout)
 
         if result.get("exceptionDetails"):
-            text = result["exceptionDetails"].get("text", "ошибка JS")
-            raise CDPError(text)
+            raise CDPError(result["exceptionDetails"].get("text", "ошибка JS"))
         return (result.get("result") or {}).get("value")
 
     def close(self) -> None:
@@ -134,6 +141,46 @@ class CDP:
             self.ws.close()
         except Exception:
             pass
+
+
+# Сбор данных со страницы. Вёрстка у WB меняется, поэтому собираем несколько
+# признаков сразу, а разбираем их уже на стороне программы: так замена
+# одного класса в разметке не ломает всё чтение.
+EXTRACT_JS = r"""
+(() => {
+    const text = document.body ? document.body.innerText : '';
+    const pick = (sel) => {
+        const el = document.querySelector(sel);
+        return el ? (el.innerText || '').trim() : '';
+    };
+
+    return {
+        title: document.title || '',
+        name: pick('h1'),
+        brand: pick('.product-page__header-brand')
+            || pick('[data-link*="brandName"]')
+            || pick('.same-part-kt__header-link'),
+        price: pick('.price-block__final-price')
+            || pick('ins.price-block__final-price')
+            || pick('.price-block__price'),
+        seller: pick('[data-link*="supplierName"]')
+             || pick('.seller-info__name'),
+        text: text.slice(0, 4000),
+        length: text.length,
+    };
+})()
+"""
+
+LEFT_RE = re.compile(r"[Оо]сталось\s+(\d+)\s*шт", re.IGNORECASE)
+SOLD_OUT_RE = re.compile(
+    r"нет в наличии|товар закончил|распродан|нет в продаже|товара нет",
+    re.IGNORECASE,
+)
+NOT_FOUND_RE = re.compile(
+    r"страница не найдена|такой страницы|ничего не найдено|товар не найден",
+    re.IGNORECASE,
+)
+PRICE_RE = re.compile(r"(\d[\d\s\u00a0]*)\s*₽")
 
 
 class BrowserClient:
@@ -146,7 +193,7 @@ class BrowserClient:
         self.headless = headless
         self.delay = delay
 
-        self.batch_size = BROWSER_BATCH
+        self.batch_size = PAGE_BATCH
         self.dead_streak = 0
         self.dest = ""
         self.attempts: list = []
@@ -164,7 +211,7 @@ class BrowserClient:
         if not exe:
             self.log("Не найден браузер. Нужен Microsoft Edge или Google Chrome.")
             self.log("Edge есть в любой Windows 10 и 11; если он удалён,")
-            self.log("укажите путь вручную в wb_config.json, ключ browser_path.")
+            self.log("укажите путь в wb_config.json, ключ browser_path.")
             return False
 
         self.log(f"Браузер: {exe}")
@@ -209,10 +256,21 @@ class BrowserClient:
             self.log(f"Не удалось подключиться к браузеру: {exc}")
             return False
 
+        self._speed_up()
         return self._open_storefront()
 
+    def _speed_up(self) -> None:
+        """Отключаем картинки и шрифты: нам нужен только текст страницы."""
+        if self.cdp is None:
+            return
+        try:
+            self.cdp.call("Network.enable")
+            self.cdp.call("Network.setBlockedURLs", {"urls": BLOCKED_RESOURCES})
+            self.log.detail("загрузка картинок и шрифтов отключена")
+        except CDPError as exc:
+            self.log.detail(f"не удалось отключить лишние ресурсы: {exc}")
+
     def _wait_for_page(self, port: int, timeout: int = 40) -> str:
-        """Ждём, пока браузер поднимет отладочный порт и создаст вкладку."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.process and self.process.poll() is not None:
@@ -230,7 +288,7 @@ class BrowserClient:
         return ""
 
     def _open_storefront(self) -> bool:
-        """Дожидаемся загрузки витрины: именно она выдаёт куки и токены."""
+        """Дожидаемся витрины: заодно это проверка, что сайт вообще открыт."""
         assert self.cdp is not None
         deadline = time.time() + 60
         self.log("Открываю витрину wildberries.ru…")
@@ -253,7 +311,6 @@ class BrowserClient:
             expected = urlparse(WB_MAIN).hostname or ""
             on_site = str(host) == expected or str(host).endswith("." + expected)
             if state in ("interactive", "complete") and on_site:
-                # Странице нужно время, чтобы выставить свои куки.
                 time.sleep(2)
                 try:
                     cookies = self.cdp.evaluate("document.cookie", timeout=15) or ""
@@ -271,105 +328,135 @@ class BrowserClient:
         self.log("Проверьте, открывается ли сайт в обычном браузере.")
         return False
 
-    # -- запросы -----------------------------------------------------------
+    # -- чтение страницы ---------------------------------------------------
 
-    def _page_fetch(self, url: str, timeout: int = 60) -> tuple[Any, str]:
-        """Выполняет fetch() внутри страницы — то есть от имени самого сайта."""
+    def _navigate(self, url: str, timeout: int = 40) -> bool:
         if self.cdp is None:
-            return None, "браузер не запущен"
-
-        script = """
-        (async () => {
-            try {
-                const r = await fetch(%s, {credentials: 'include'});
-                const t = await r.text();
-                return {ok: true, status: r.status, body: t};
-            } catch (e) {
-                return {ok: false, status: 0, body: String(e)};
-            }
-        })()
-        """ % json.dumps(url)
-
+            return False
         try:
-            result = self.cdp.evaluate(script, timeout=timeout)
+            self.cdp.call("Page.navigate", {"url": url}, timeout=timeout)
         except CDPError as exc:
-            return None, f"браузер: {exc}"
+            self.log.detail(f"навигация на {url}: {exc}")
+            return False
 
-        if not isinstance(result, dict):
-            return None, "браузер вернул неожиданный ответ"
-        if not result.get("ok"):
-            return None, f"fetch не удался: {str(result.get('body'))[:100]}"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                state = self.cdp.evaluate("document.readyState", timeout=10)
+            except CDPError:
+                time.sleep(0.4)
+                continue
+            if state == "complete":
+                return True
+            time.sleep(0.3)
+        return False
 
-        status = result.get("status")
-        body = result.get("body") or ""
-        if status != 200:
-            self.log.detail(f"{url} -> {status}; тело: {body[:200]}")
-            return None, f"HTTP {status}"
+    def _wait_for_card(self, timeout: int = 12) -> None:
+        """Цена и наличие дорисовываются скриптом уже после загрузки.
+
+        Ждём именно заголовок товара: объём текста для этого не годится —
+        у коротких карточек его мало, и ожидание упирается в таймаут,
+        превращая пару секунд на страницу в полтора десятка.
+        """
+        if self.cdp is None:
+            return
+
+        deadline = time.time() + timeout
+        seen_title = False
+        while time.time() < deadline:
+            try:
+                state = self.cdp.evaluate(
+                    "(() => ({"
+                    " h1: !!document.querySelector('h1'),"
+                    " price: !!document.querySelector("
+                    "'.price-block__final-price, .price-block__price'),"
+                    " len: document.body ? document.body.innerText.length : 0"
+                    "}))()", timeout=10)
+            except CDPError:
+                return
+            if not isinstance(state, dict):
+                return
+
+            if state.get("h1") or state.get("len", 0) > 200:
+                # Заголовок есть; цене даём короткую фору дорисоваться.
+                if state.get("price") or seen_title:
+                    return
+                seen_title = True
+                time.sleep(0.4)
+                continue
+            time.sleep(0.3)
+
+    def read_product(self, nm: int) -> dict | None:
+        """Открывает публичную страницу товара и снимает с неё данные."""
+        if not self._navigate(PRODUCT_URL.format(nm=nm)):
+            return None
+        self._wait_for_card()
 
         try:
-            return json.loads(body), ""
-        except Exception:
-            return None, "ответ не JSON"
+            raw = self.cdp.evaluate(EXTRACT_JS, timeout=20) if self.cdp else None
+        except CDPError as exc:
+            self.log.detail(f"артикул {nm}: страница не прочитана: {exc}")
+            return None
+        if not isinstance(raw, dict):
+            return None
 
-    def detect_dest(self) -> str:
-        """Код региона спрашиваем у WB через ту же страницу."""
-        from urllib.parse import parse_qs
+        text = str(raw.get("text") or "")
+        if NOT_FOUND_RE.search(text) or int(raw.get("length") or 0) < 120:
+            self.log.detail(f"артикул {nm}: карточки нет")
+            return {"id": nm, "_absent": True}
 
-        url = GEO_URL + "?" + urlencode({
-            "currency": "RUB", "latitude": "55.7522",
-            "longitude": "37.6156", "locale": "ru",
-        })
-        payload, error = self._page_fetch(url, timeout=30)
-        if error or not isinstance(payload, dict):
-            self.log.detail(f"гео через браузер не дал dest: {error}")
-            return ""
+        left = LEFT_RE.search(text)
+        if left:
+            quantity, known = int(left.group(1)), True
+        elif SOLD_OUT_RE.search(text):
+            quantity, known = 0, True
+        else:
+            # Товар продаётся, но точного числа WB на странице не показывает.
+            quantity, known = 0, False
 
-        xinfo = payload.get("xinfo")
-        if isinstance(xinfo, str) and xinfo:
-            dest = parse_qs(xinfo).get("dest", [""])[0].strip()
-            if dest:
-                return dest
+        price = None
+        match = PRICE_RE.search(str(raw.get("price") or "")) or PRICE_RE.search(text)
+        if match:
+            digits = re.sub(r"\D", "", match.group(1))
+            if digits:
+                price = float(digits)
 
-        destinations = payload.get("destinations")
-        if isinstance(destinations, list):
-            positive = [d for d in destinations if isinstance(d, int) and d > 0]
-            if positive:
-                return str(max(positive))
-        return ""
+        return {
+            "id": nm,
+            "name": str(raw.get("name") or raw.get("title") or "").strip()[:200],
+            "brand": str(raw.get("brand") or "").strip()[:100],
+            "supplier": str(raw.get("seller") or "").strip()[:100],
+            "totalQuantity": quantity,
+            "_stock_known": known,
+            "_page_price": price,
+        }
 
     def fetch(self, nms: Sequence[int], attempts: int = 0) -> tuple[list[dict], str]:
-        """Пачка артикулов одним запросом от имени страницы."""
-        if self.delay:
-            time.sleep(self.delay)
+        """Страницы открываются по одной; пачка нужна для отображения хода."""
+        products: list[dict] = []
+        failures = 0
 
-        url = CARD_URL + "?" + urlencode({
-            "appType": "1",
-            "curr": "rub",
-            "dest": self.dest,
-            "spp": "30",
-            "hide_dtype": "10",
-            "ab_testing": "false",
-            "lang": "ru",
-            "nm": ";".join(str(nm) for nm in nms),
-        })
+        for nm in nms:
+            if self.delay:
+                time.sleep(self.delay)
+            product = self.read_product(nm)
+            if product is None:
+                failures += 1
+                continue
+            if product.get("_absent"):
+                continue           # карточки нет — в отчёте «нет на сайте»
+            products.append(product)
 
-        payload, error = self._page_fetch(url)
-        if error:
+        if failures and not products:
             self.dead_streak += 1
-            return [], error
+            return [], "страница не открылась"
 
         self.dead_streak = 0
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if isinstance(data, dict) and isinstance(data.get("products"), list):
-            return [p for p in data["products"] if isinstance(p, dict)], ""
-        if isinstance(payload, dict) and isinstance(payload.get("products"), list):
-            return [p for p in payload["products"] if isinstance(p, dict)], ""
-        return [], ""
+        return products, ""
 
     def shrink(self, failed_size: int) -> None:
-        if failed_size >= self.batch_size and self.batch_size > 5:
-            self.batch_size = max(5, self.batch_size // 2)
-            self.log(f"  уменьшаю пачку до {self.batch_size} шт")
+        """Страницы читаются по одной, дробить нечего."""
+        return
 
     # -- завершение --------------------------------------------------------
 

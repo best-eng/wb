@@ -450,6 +450,11 @@ def product_stock(product: dict) -> int:
 
 
 def product_price(product: dict) -> float | None:
+    # Цена, снятая со страницы товара, уже в рублях.
+    page_price = product.get("_page_price")
+    if isinstance(page_price, (int, float)) and page_price > 0:
+        return round(float(page_price), 2)
+
     for size in product.get("sizes") or []:
         if not isinstance(size, dict):
             continue
@@ -1029,18 +1034,33 @@ def build_rows(articles: Sequence[int], products: dict[int, dict],
         if product is not None:
             stock = product_stock(product)
             source = "сайт WB"
+            note = ""
+
+            # Со страницы товара точное число видно, только когда его мало.
+            # В остальных случаях известно лишь то, что товар продаётся.
+            known = product.get("_stock_known", True)
+            if not known:
+                status = STATUS_ON_SALE
+                note = "в наличии; точное число WB на странице не показывает"
+            else:
+                status = STATUS_ON_SALE if stock > 0 else STATUS_ZERO
+
             if nm in supplier:
                 stock = supplier[nm]
+                status = STATUS_ON_SALE if stock > 0 else STATUS_ZERO
                 source = "API продавца"
+                note = ""
+
             rows.append(Row(
                 nm=nm,
-                status=STATUS_ON_SALE if stock > 0 else STATUS_ZERO,
+                status=status,
                 stock=stock,
                 source=source,
                 name=str(product.get("name") or ""),
                 brand=str(product.get("brand") or ""),
                 seller=str(product.get("supplier") or product.get("supplierId") or ""),
                 price=product_price(product),
+                note=note,
             ))
         elif nm in supplier:
             stock = supplier[nm]
@@ -1257,8 +1277,8 @@ def start_browser_client(config: Config, log: Log):
         client.close()
         return None
 
-    client.dest = config.dest or client.detect_dest() or DEST_CANDIDATES[0]
-    log(f"Регион: dest={client.dest}")
+    # Код региона тут не нужен: открывается обычная страница товара.
+    log("Читаю публичные страницы товаров — примерно 2-3 секунды на артикул.")
     return client
 
 
