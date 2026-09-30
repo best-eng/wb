@@ -271,14 +271,29 @@ class Config:
         if env_proxy:
             raw_proxies.append(env_proxy)
 
+        guessed = 0
         for item in raw_proxies:
             try:
                 normalized = normalize_proxy(item)
             except ValueError as exc:
                 log(f"! прокси пропущен — {exc}")
                 continue
-            if normalized and normalized not in cfg.proxies:
+            if not normalized:
+                continue
+            if normalized not in cfg.proxies:
                 cfg.proxies.append(normalized)
+
+            # Протокол не указан — проверим и SOCKS5. Продавцы часто дают
+            # один адрес, работающий по обоим, а угадывать за пользователя
+            # молча нельзя: неверный протокол выглядит как мёртвый прокси.
+            if "://" not in item.strip() and normalized.startswith("http://"):
+                socks = "socks5h://" + normalized[len("http://"):]
+                if socks not in cfg.proxies:
+                    cfg.proxies.append(socks)
+                    guessed += 1
+
+        if guessed:
+            log(f"Протокол не указан у {guessed} адр. — проверю и http, и socks5")
 
         token_file = folder / "token.txt"
         if not cfg.token and token_file.exists():
@@ -530,7 +545,7 @@ class WBClient:
             return
 
         # Длинные списки целиком не проверяем — это долгий старт без пользы.
-        for _ in range(min(len(self.proxies), 5)):
+        for _ in range(min(len(self.proxies), 10)):
             self.new_session(warm_up=False)
             if self.report_ip():
                 return
